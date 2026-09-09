@@ -79,6 +79,21 @@ ensure_kill_switch() {
         log "kill-switch rules missing, re-applying"
         apply_kill_switch
     fi
+    add_lan_routes
+}
+
+# redirect-gateway def1 routes ALL traffic through the tunnel, including
+# replies to LAN clients (docker bridge, reverse proxy, published ports).
+# Add explicit routes for RFC1918 space via the docker gateway so that
+# established replies reach the LAN; new outbound LAN traffic is still
+# dropped by the kill-switch (OUTPUT DROP), so this does not open a leak.
+add_lan_routes() {
+    GW=$(ip route show default 2>/dev/null | awk '{print $3; exit}')
+    DEV=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+    [ -n "$GW" ] || return 0
+    for NET in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+        ip route replace "$NET" via "$GW" dev "$DEV" >/dev/null 2>&1
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -377,6 +392,8 @@ resolve_endpoints
 
 apply_kill_switch
 log "kill-switch active: all non-VPN outbound traffic is blocked"
+
+add_lan_routes
 
 # Start nginx + flood immediately so the (local) web UI is reachable even
 # before the tunnel is up; both bind loopback / are proxied over loopback.
