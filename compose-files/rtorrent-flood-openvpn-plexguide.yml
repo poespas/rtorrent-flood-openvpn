@@ -16,7 +16,7 @@
         pgrole: 'rflood-openvpn'
         intport: '80'
         extport: '5896'
-        image: 'h1f0x/rtorrent-flood-openvpn'
+        image: 'ghcr.io/poespas/rtorrent-flood-openvpn'
 
     # CORE (MANDATORY) ############################################################
     - name: 'Including cron job'

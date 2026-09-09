@@ -1,0 +1,44 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t rtorrent-flood-openvpn:ci .
+
+      - name: Smoke test (no VPN config => fail-closed)
+        run: |
+          set -e
+          cfg="$(mktemp -d)"
+          cid="$(docker run -d --rm --privileged --name rflood-ci \
+              -v "${cfg}:/config" \
+              -p 8091:80 \
+              rtorrent-flood-openvpn:ci)"
+          echo "container: ${cid}"
+          sleep 15
+
+          # services that must be up (loopback UI, flood, nginx)
+          docker exec rflood-ci sh -c 'pgrep -f /usr/local/bin/flood' >/dev/null || { echo "flood not running"; exit 1; }
+          curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:8091/ || { echo "UI not reachable"; exit 1; }
+
+          # rtorrent must NOT be started (it is gated behind the VPN)
+          if docker exec rflood-ci sh -c 'pgrep -f /usr/bin/rtorrent' >/dev/null; then
+            echo "rtorrent started without a VPN - unexpected"; exit 1
+          fi
+
+          # egress must be blocked entirely (fail-closed kill-switch)
+          if docker exec rflood-ci curl -4 -fsS --max-time 8 https://ifconfig.co/ip >/dev/null 2>&1; then
+            echo "outbound egress works without a VPN - LEAK"; exit 1
+          fi
+
+          docker rm -f rflood-ci >/dev/null 2>&1 || true
+          echo "smoke test passed: UI up, services gated, no egress without VPN"
