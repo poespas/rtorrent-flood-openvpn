@@ -53,6 +53,25 @@ Then:
 > After changing `client.conf` (especially the server hostname) restart the
 > container so the endpoint can be re-resolved and allow-listed.
 
+## User IDs and permissions
+
+The container's **PID 1 runs as root** because OpenVPN must create the tun
+device and apply the iptables kill-switch. All the service processes that
+touch your data (**rtorrent** and **flood**) drop privileges to a dedicated
+`rtorrent` user, which is created as **uid/gid 1000:1000 by default**. On
+every boot `prepare-config.sh` `chown`s `/config` and `/output` to that user,
+so downloads land on `/output` owned by uid 1000 (your typical host user).
+
+If your host user is a different uid/gid, set the **`PUID`/`PGID` build args**:
+
+```bash
+docker build --build-arg PUID=1000 --build-arg PGID=1000 -t rtorrent-flood-openvpn .
+```
+
+> Do not run the whole container with `--user` — the kill-switch/OpenVPN
+> still need root (PID 1). Only the file-touching services drop to
+> `rtorrent`.
+
 ## Volumes
 
 | Volume | Description |
