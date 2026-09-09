@@ -1,0 +1,13 @@
+# Secrets / provider credentials - never commit
+*.ovpn
+vpn.auth
+*.key
+*.crt
+*.pem
+flood.secret
+
+# local test secrets
+/tests/secrets/
+
+# docker
+*.tar

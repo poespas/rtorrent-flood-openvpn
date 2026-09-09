@@ -1,205 +1,146 @@
-# rTorrent + FloodUI + OpenVPN
-Docker container for rTorrent + FloodUI with integrated OpenVPN client.
+# rTorrent + Flood + OpenVPN
 
-It is based on the latest CentOS docker image:
-- https://hub.docker.com/_/centos
+Docker container for **rTorrent** + **[Flood](https://github.com/jesec/flood)** (v4) with an
+integrated **OpenVPN** client and a **fail-closed network kill-switch**.
 
-## What does this image?
-The container connects at startup during the boot process to the OpenVPN service of your choice. After the OpenVPN client connected successfully, the rTorrent and FloodUI service will startup.
+Built on Alpine Linux. Flood v4 is installed from the official standalone
+[releases](https://github.com/jesec/flood/releases) (no Node.js runtime needed).
 
-![FloodUI](https://github.com/h1f0x/rtorrent-flood-openvpn/blob/master/images/1.png?raw=true) 
+## What it does
 
-## Install instructions
+- At boot the container locks the network down **before** OpenVPN starts:
+  the iptables `OUTPUT` chain defaults to `DROP` and only allows the VPN
+  tunnel, loopback, and the (numeric) VPN server endpoint.
+- OpenVPN connects, and only **after** the tunnel is up *and* verified to
+  actually carry traffic (external IP reachable) does rtorrent start.
+- Flood + nginx bind loopback and serve the web UI immediately.
+- **If the VPN drops, the container has no connectivity at all.** Traffic
+  can never fall back to the host network. The supervisor reconnects
+  automatically and services resume once the tunnel is back.
+- The current external (VPN) IP is written to `/config/my-external-ip.txt`
+  and refreshed roughly every 60 seconds.
 
-### Important
-Login: Torrent:Torrent
-Connect: 127.0.0.1:5000
+![FloodUI](images/1.png)
 
-> In case it doesn't auto connect....
+## Quick start
 
-### Docker volumes
-The following volumes will get mounted:
-
-- /path/to/config:/config
-- /path/to/output/incomplete:/output/incomplete
-- /path/to/output/complete:/output/complete
-
-
-### OpenVPN configuration
-Prepare an OpenVPN configuration of your choice. An automated login by username/password is also possible with the "user-pass-auth" parameter in the client.conf
-
-> Should no configuration be present at the first run, an example config will be deployed at the mounted /config folder which can be edited.
-
-The OpenVPN service will be verified every 60s. If it's not running anymore it will restart the connection.
-
-### Deploy the docker container
-To get the docker up and running execute fhe following command:
-
-```
-sudo docker run -it --privileged --name rtorrent-flood-openvpn -v /path/to/config:/config -v /path/to/output:/output -d -p 8000:80 -p 8080:8080 h1f0x/rtorrent-flood-openvpn
-```
-> If not done already, deploy or modify the OpenVPN client.conf at /path/to/config/vpn
-
-```
-docker restart rtorrent-flood-openvpn
+```bash
+docker run -d \
+  --name rflood \
+  --cap-add=NET_ADMIN \
+  --device=/dev/net/tun \
+  -p 8000:80 \
+  -p 8080:8080 \
+  -v /path/to/config:/config \
+  -v /path/to/output:/output \
+  ghcr.io/poespas/rtorrent-flood-openvpn
 ```
 
-### Verify OpenVPN status
-In "/config/my-external-ip.txt"  the current external ip address can be found. The file will be updated every 60s.
+> Networking requires `CAP_NET_ADMIN` and access to `/dev/net/tun`
+> (`--privileged` also works but is broader than needed).
 
-### Sonarr Support
-You can use Sonarr with this client as well. Configure your Sonarr with the following params:
+Then:
+
+1. Put your provider's OpenVPN config at `/path/to/config/vpn/client.conf`
+   and credentials in `/path/to/config/vpn/vpn.auth` (a template is deployed
+   on first run).
+2. Restart the container:
+   ```bash
+   docker restart rflood
+   ```
+3. Open http://localhost:8000 in your browser.
+
+> After changing `client.conf` (especially the server hostname) restart the
+> container so the endpoint can be re-resolved and allow-listed.
+
+## Volumes
+
+| Volume | Description |
+| :--- | :--- |
+| `/path/to/config:/config` | VPN config, rtorrent state, flood data |
+| `/path/to/output/incomplete:/output/incomplete` | incomplete downloads |
+| `/path/to/output/complete:/output/complete` | completed downloads |
+
+## OpenVPN
+
+Drop in any standard `.ovpn`/`client.conf`. Notes:
+
+- `auth-user-pass` should point at `/config/vpn/vpn.auth`.
+- Deprecated/removed directives (`keysize`, `ns-cert-type`, `comp-lzo`,
+  `fragment`, `block-outside-dns`, ...) are stripped automatically at boot.
+- All traffic (DNS included) is forced through the tunnel
+  (`redirect-gateway`), and DNS is served over the tunnel.
+- The service is verified continuously; if OpenVPN dies it is restarted with
+  backoff. During an outage the kill-switch guarantees **no connectivity**.
+
+### Sonarr
+
+Configure Sonarr with:
 
 ```
-# Normal Container
 Name: rflood-openvpn
 Enable: Yes
-Host: <IP> or <HOSTNAME>
-Port: 8080
-Username & Password: empty
-
-# PGBlitz
-Name: rflood-openvpn
-Enable: Yes
-Host: rflood-openvpn
+Host: <IP or HOSTNAME>
 Port: 8080
 Username & Password: empty
 ```
 
 ### Tagging
-This docker container supports tagging when feeding new torrents.
 
-If a tag is set, the torrent will be copied to the following location once it's finished:
+If a torrent is added with a tag set, it is copied on completion to
+`/output/complete/{tag}`; otherwise `/output/complete/unsorted`.
 
-```
-/output/complete/{tag}
-```
+## Flood v4
 
-If no tag is set, the default location is:
+Flood is the latest jesec/flood v4 (pinned via the `FLOOD_VERSION` build
+arg, defaults to the newest release). Notable changes vs. the old flood:
 
-```
-/output/complete/unsorted
-```
+- **No `Torrent : Torrent` login.** Flood runs with `--auth none` and its
+  rtorrent connection is pre-configured (`127.0.0.1:5000`, SCGI). If you
+  expose it publicly, put an authenticating reverse proxy in front.
+- Advanced options can be set through `/config/flood/flood.env`
+  (`FLOOD_OPTION_*` variables, e.g. `FLOOD_OPTION_auth=default`); see the
+  comments in that file or run `docker exec <name> flood --help`.
 
-## Configuration files
+## Config layout
 
-Several configuration files will be deployed to the mounted /config folder:
+`/config` gets populated on first run:
 
-| Folder | Description |
+| Path | Description |
 | :--- | :--- |
-| flood/* | flood default db / user file |
-| rtorrent/* | rtorrent.rc, session data, *.torrent files, etc. |
-| vpn/* | vpn default config / user config |
+| `vpn/client.conf`, `vpn/auth` | OpenVPN config + credentials |
+| `rtorrent/rtorrent.rc` | rtorrent configuration |
+| `rtorrent/session`, `rtorrent/watch`, `rtorrent/log` | rtorrent state |
+| `flood/` | flood db/temp/secret + optional `flood.env` overrides |
+| `my-external-ip.txt` | current external (VPN) IP, updated ~60s |
 
-### FloodUI default settings
-> The default login for FloodUI is `Torrent` : `Torrent`
+## Testing the VPN (kill-switch)
 
-Please change the username : password in the settings.
+`tests/test-vpn.sh` verifies end-to-end against a **real** VPN provider.
+It never stores your credentials in the repository - point it at a directory
+that already contains a `vpn/client.conf` + `vpn/vpn.auth`:
 
-The configured socket is `scgi_port = 0.0.0.0:5000`
-
-### rTorrent default settings
-
-#### Listening port for incoming peer traffic
-```
-network.port_range.set = 50000-50000
-network.port_random.set = no
-```
-#### Check the hash after the end of the download
-```
-check_hash = yes
-```
-#### Enable DHT (for torrents without trackers)
-```
-dht = auto
-dht_port = 6881
-peer_exchange = yes
-```
-#### Authorize UDP trackers
-```
-use_udp_trackers = yes
-```
-#### Peer settings
-```
-throttle.max_uploads.set = 100
-throttle.max_uploads.global.set = 250
-throttle.min_peers.normal.set = 20
-throttle.max_peers.normal.set = 60
-throttle.min_peers.seed.set = 30
-throttle.max_peers.seed.set = 80
-trackers.numwant.set = 80
-```
-#### Encryption
-```
-protocol.encryption.set = allow_incoming,try_outgoing,enable_retry
-```
-#### Limits for file handle resources
-```
-network.http.max_open.set = 50
-network.max_open_files.set = 600
-network.max_open_sockets.set = 300
-```
-#### Memory resource usage
-```
-pieces.memory.max.set = 1800M
-network.xmlrpc.size_limit.set = 12M
+```bash
+tests/test-vpn.sh --config-dir /path/to/your/vpn-config
 ```
 
-#### Basic operational settings 
-```
-session.path.set = (cat, (cfg.session))
-directory.default.set = (cat, (cfg.download))
-log.execute = (cat, (cfg.logs), "execute.log")
-log.xmlrpc = (cat, (cfg.logs), "xmlrpc.log")
-execute.nothrow = sh, -c, (cat, "echo >",\
-    (session.path), "rtorrent.pid", " ",(system.pid))
-```
-#### Other operational settings
-```
-encoding.add = utf8
-system.umask.set = 0027
-system.cwd.set = (directory.default)
-network.http.dns_cache_timeout.set = 25
-schedule2 = monitor_diskspace, 15, 60, ((close_low_diskspace, 1000M))
-method.insert = system.startup_time, value|const, (system.time)
-method.insert = d.data_path, simple,\
-    "if=(d.is_multi_file),\
-        (cat, (d.directory), /),\
-        (cat, (d.directory), /, (d.name))"
-method.insert = d.session_file, simple, "cat=(session.path), (d.hash), .torrent"
-```
-#### Watch directories
-```
-## Add torrent
-schedule2 = watch_load, 11, 10, ((load.verbose, (cat, (cfg.watch), "load/*.torrent")))
-## Add & download straight away
-schedule2 = watch_start, 10, 10, ((load.start_verbose, (cat, (cfg.watch), "start/*.torrent")))
-```
-#### Move on finished
-```
-method.insert = d.get_finished_dir,simple,\
-        "if=(d.get_custom1),\
-        (cat, /output/complete/, (d.get_custom1), /),\
-        (cat, /output/complete/unsorted/)"
-method.set_key = event.download.finished,move_complete,"d.stop=;execute=mkdir,-p,$d.get_finished_dir=;execute=cp,-fr,$d.get_base_path=,$d.get_finished_dir=;d.start=;d.hash"
-```
-#### Socket specs
-```
-scgi_port = 0.0.0.0:5000
-```
-#### Ratio trigger
-```
-method.set = group.seeding.ratio.command, "d.close="
-```
-#### Logging
-```
-print = (cat, "Logging to ", (cfg.logfile))
-log.open_file = "log", (cfg.logfile)
-log.add_output = "info", "log"
-#log.add_output = "tracker_debug", "log"
-```
-## Enjoy!
+It checks:
 
-Open the browser and go to:
+- **A – VPN up:** egress goes through the VPN (container external IP differs
+  from the host's), rtorrent/flood/nginx run, web UI responds.
+- **B – VPN down:** the container has *no* connectivity (name resolution and
+  direct-IP connections both fail) while the local web UI stays reachable.
+- **C – recovery:** the supervisor reconnects automatically and egress
+  resumes through the VPN.
 
-> http://localhost:8000
+## Releases
+
+A GitHub Action builds and publishes the image **monthly** (and on manual
+`workflow_dispatch`) to:
+
+- GHCR: `ghcr.io/poespas/rtorrent-flood-openvpn` (`latest` + `vYYYY.MM[.n]`)
+- A tagged GitHub Release with the pinned flood version and image digest.
+
+## License
+
+GPL v3.0, see [LICENSE](LICENSE).

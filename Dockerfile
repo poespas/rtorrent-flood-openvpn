@@ -1,68 +1,64 @@
-FROM amd64/centos:latest
+# syntax=docker/dockerfile:1
 
-# Enabled systemd
-ENV container docker
+# rTorrent + Flood (jesec/flood v4) + OpenVPN client with a fail-closed
+# network kill-switch. Built on Alpine Linux.
+#
+# flood is distributed as a standalone (self-contained) binary, see
+# https://github.com/jesec/flood/releases
+FROM alpine:3.21
 
-RUN (cd /lib/systemd/system/sysinit.target.wants/; for i in *; do [ $i == \
-systemd-tmpfiles-setup.service ] || rm -f $i; done); \
-rm -f /lib/systemd/system/multi-user.target.wants/*;\
-rm -f /etc/systemd/system/*.wants/*;\
-rm -f /lib/systemd/system/local-fs.target.wants/*; \
-rm -f /lib/systemd/system/sockets.target.wants/*udev*; \
-rm -f /lib/systemd/system/sockets.target.wants/*initctl*; \
-rm -f /lib/systemd/system/basic.target.wants/*;\
-rm -f /lib/systemd/system/anaconda.target.wants/*;
+ARG FLOOD_VERSION=4.16.1
 
-#VOLUME [ "/sys/fs/cgroup" ]
+LABEL org.opencontainers.image.title="rtorrent-flood-openvpn" \
+      org.opencontainers.image.description="rTorrent + Flood UI behind an OpenVPN client with a network kill-switch" \
+      org.opencontainers.image.source="https://github.com/poespas/rtorrent-flood-openvpn"
 
-VOLUME [ "/config" ]
-VOLUME [ "/output" ]
+ENV container=docker
 
-# copy root
+# Runtime dependencies
+RUN apk add --no-cache \
+    openvpn \
+    iptables \
+    ip6tables \
+    iproute2 \
+    rtorrent \
+    screen \
+    nginx \
+    curl \
+    ca-certificates
+
+# Dedicated (unprivileged) user for rtorrent/flood
+RUN addgroup -S rtorrent \
+    && adduser -S -G rtorrent -h /home/rtorrent -s /bin/sh rtorrent \
+    && mkdir -p /home/rtorrent \
+    && chown -R rtorrent:rtorrent /home/rtorrent
+
+# Install flood v4 (standalone binary; bundles Node.js)
+RUN set -eux; \
+    case "$(uname -m)" in \
+        x86_64)  FLOOD_ASSET="flood-linux-x64" ;; \
+        aarch64) FLOOD_ASSET="flood-linux-arm64" ;; \
+        *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /usr/local/bin/flood \
+        "https://github.com/jesec/flood/releases/download/v${FLOOD_VERSION}/${FLOOD_ASSET}"; \
+    chmod +x /usr/local/bin/flood
+
+# Copy root filesystem
 COPY rootfs/ /
 
-# OpenVPN
-RUN yum install -y epel-release
-RUN yum update -y
-RUN yum install -y openvpn
+# Install nginx config and make scripts executable
+RUN install -m 0644 /defaults/config/nginx/nginx.conf /etc/nginx/nginx.conf \
+    &&     chmod +x \
+        /usr/local/bin/supervisor \
+        /usr/local/bin/prepare-config.sh \
+        /usr/local/bin/kill-switch.sh \
+        /usr/local/bin/move-complete.sh \
+        /usr/bin/up.sh \
+        /usr/bin/down.sh
 
+VOLUME ["/config", "/output"]
 
-# rTorrent
-RUN yum install -y rtorrent screen psmisc
-RUN useradd rtorrent -d /home/rtorrent -G wheel
+EXPOSE 80 8080
 
-# flood
-RUN yum -y install gcc-c++ make
-RUN yum -y install mediainfo libmediainfo mediainfo-gui
-RUN curl -sL https://rpm.nodesource.com/setup_8.x | bash -
-RUN yum install -y nodejs git
-RUN git clone https://github.com/jfurrow/flood.git /opt/flood
-RUN cp /defaults/config/flood/config.js /opt/flood/config.js
-WORKDIR /opt/flood/
-RUN npm install
-RUN npm install -g node-gyp
-RUN npm run build
-# RUN useradd flood -d /home/flood -G wheel
-RUN chown -R rtorrent:rtorrent /opt/flood/
-
-# nginx
-RUN yum install -y nginx
-RUN cp -r /defaults/config/nginx/nginx.conf /etc/nginx/nginx.conf
-
-# crontab
-RUN yum install -y cronie
-RUN (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/verify-external-ip.sh") | crontab -
-RUN (crontab -l 2>/dev/null; echo "@reboot /usr/bin/verify-external-ip.sh") | crontab -
-RUN (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/verify-services.sh") | crontab -
-
-#configure services (systemd)
-RUN systemctl enable openvpn-own-client.service
-RUN systemctl enable prepare-config.service
-RUN systemctl enable rtorrent.service
-RUN systemctl enable flood.service
-RUN systemctl enable nginx
-
-WORKDIR /root/
-
-# End
-CMD ["/usr/sbin/init"]
+CMD ["/usr/local/bin/supervisor"]
