@@ -136,10 +136,12 @@ It checks:
 ## Releases
 
 A GitHub Action builds and publishes the image **monthly** (and on manual
-`workflow_dispatch`) to:
+`workflow_dispatch`) to GHCR, tagged by flood version:
 
-- GHCR: `ghcr.io/poespas/rtorrent-flood-openvpn` (`latest` + `vYYYY.MM[.n]`)
-- A tagged GitHub Release with the pinned flood version and image digest.
+- `ghcr.io/poespas/rtorrent-flood-openvpn:latest`
+- `ghcr.io/poespas/rtorrent-flood-openvpn:<flood-version>` (e.g. `4.16.1`)
+
+No GitHub Releases or git tags are created.
 
 ## License
 
