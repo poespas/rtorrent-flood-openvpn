@@ -1,4 +1,4 @@
-name: release
+name: publish
 
 on:
   schedule:
@@ -7,11 +7,10 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
   packages: write
 
 concurrency:
-  group: release
+  group: publish
   cancel-in-progress: false
 
 jobs:
@@ -24,24 +23,10 @@ jobs:
       - name: Resolve latest flood version
         id: flood
         run: |
+          # strip the leading "v" from the flood release tag, e.g. v4.16.1 -> 4.16.1
           version="$(curl -fsSL https://api.github.com/repos/jesec/flood/releases/latest \
             | jq -r .tag_name | sed 's/^v//')"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-
-      - name: Compute release tag
-        id: tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          base="v$(date +%Y.%m)"
-          tag="${base}"
-          bump=1
-          while gh release view "${tag}" >/dev/null 2>&1; do
-            tag="${base}.${bump}"
-            bump=$((bump + 1))
-          done
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "Resolved release tag: ${tag}"
 
       - name: Compute image name
         id: img
@@ -63,7 +48,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -71,24 +55,5 @@ jobs:
           build-args: FLOOD_VERSION=${{ steps.flood.outputs.version }}
           push: true
           tags: |
-            ${{ steps.img.outputs.image }}:${{ steps.tag.outputs.tag }}
             ${{ steps.img.outputs.image }}:latest
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="${{ steps.tag.outputs.tag }}"
-          {
-            echo "Automated monthly release."
-            echo ""
-            echo "- Image: \`${{ steps.img.outputs.image }}\`"
-            echo "- Tags: \`latest\`, \`${tag}\`"
-            echo "- Flood version: \`v${{ steps.flood.outputs.version }}\`"
-            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
-          } > /tmp/release-notes.md
-          git tag "${tag}"
-          git push origin "${tag}"
-          gh release create "${tag}" \
-            --title "Monthly release ${tag}" \
-            --notes-file /tmp/release-notes.md
+            ${{ steps.img.outputs.image }}:${{ steps.flood.outputs.version }}
