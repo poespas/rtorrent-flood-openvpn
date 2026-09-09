@@ -102,6 +102,82 @@ arg, defaults to the newest release). Notable changes vs. the old flood:
   (`FLOOD_OPTION_*` variables, e.g. `FLOOD_OPTION_auth=default`); see the
   comments in that file or run `docker exec <name> flood --help`.
 
+## Migrating from the old CentOS image (flood v1)
+
+If you are already running the old image (`h1f0x/rtorrent-flood-openvpn`,
+CentOS + flood v1) and want to move to this fork's flood v4 image
+(`ghcr.io/poespas/rtorrent-flood-openvpn`), you can update **in place** - the
+mounted `/config` and `/output` carry over. Only the rtorrent config needs
+manual changes.
+
+1. **Back up** `/config` (especially `rtorrent/rtorrent.rc`) and take note of
+   how the container is started (ports, volumes, networks, env).
+2. **Switch the image and recreate the container.** Docker cannot swap the
+   image on a running container, so recreate it with the same mounts and
+   flags. The new image needs `--cap-add=NET_ADMIN` and `/dev/net/tun` (or
+   `--privileged`):
+   ```bash
+   # old:  image: h1f0x/rtorrent-flood-openvpn
+   docker compose up -d
+   ```
+   ```yaml
+   # docker-compose.yml (excerpt)
+   services:
+     torrent:
+       image: ghcr.io/poespas/rtorrent-flood-openvpn
+       privileged: true
+       volumes:
+         - /etc/flood:/config
+         - /mnt/disk0:/output
+       environment:
+         - VIRTUAL_HOST=dl.example.com   # optional: for an nginx-proxy in front
+   networks:
+     nginx-proxy:
+       external: true                   # optional: join your reverse proxy's network
+   ```
+   `vpn/client.conf`, `vpn/vpn.auth` and the rtorrent `session/`, `watch/`
+   and `/output` trees are reused untouched (first-boot only fills in what is
+   missing).
+3. **Migrate `rtorrent/rtorrent.rc`.** rtorrent 0.10 removed/renamed a few
+   commands that the old config uses, so the old file will not start
+   (`rtorrent` fails to parse, the supervisor logs "rtorrent failed to
+   start"). Either replace it with the new default
+   (`/config/rtorrent/rtorrent.rc` is not overwritten - copy it from the
+   image with `docker cp <name>:/defaults/config/rtorrent/rtorrent.rc .` and
+   re-apply your tweaks), or patch these specific lines:
+
+   - Remove `peer_exchange = yes` and `use_udp_trackers = yes`
+     (removed in rtorrent 0.10; PEX and UDP trackers are enabled by default).
+   - Rename the legacy getters:
+     `d.get_custom1` → `d.custom1` and `d.get_base_path` → `d.base_path`.
+   - Replace the inline move-on-finished event with the new helper-script
+     version:
+     ```
+     method.insert = d.get_finished_dir,simple,\
+             "if=(d.custom1),\
+             (cat, /output/complete/, (d.custom1), /),\
+             (cat, /output/complete/unsorted/)"
+     method.insert = d.move_complete,simple,"execute=/usr/local/bin/move-complete.sh,$d.base_path=,$d.get_finished_dir="
+     method.set_key = event.download.finished,move_complete,"d.stop=;d.move_complete=;d.start=;d.hash"
+     ```
+
+   > Why: the old event chained several `execute=mkdir/cp` calls and used
+   > `d.get_base_path`/`d.get_custom1`. rtorrent 0.10 renamed those getters
+   > and only reliably runs the first `execute` in a multi-command event, so
+   > the copy is wrapped in `/usr/local/bin/move-complete.sh`.
+
+4. **Expect a one-time re-check.** On the first start, rtorrent 0.10
+   re-verifies the hashes of your existing data (old fast-resume data is not
+   trusted across the version jump). During this rtorrent does not answer
+   SCGI, so the Flood UI may sit on its boot/loading screen (e.g. stuck on
+   "Data Transfer History") until the re-check finishes - it can take tens of
+   minutes for large libraries. This happens only once; later restarts are
+   fast.
+5. **Flood v1 UI state does not migrate.** Flood v4 uses a different database
+   and runs with `--auth none` (no `Torrent : Torrent` login), so old flood
+   history, users and settings do not carry over. Torrents themselves are
+   unaffected (they live in the rtorrent session).
+
 ## Config layout
 
 `/config` gets populated on first run:
