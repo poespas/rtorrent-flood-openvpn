@@ -27,9 +27,18 @@ RUN apk add --no-cache \
     curl \
     ca-certificates
 
-# Dedicated (unprivileged) user for rtorrent/flood
-RUN addgroup -S rtorrent \
-    && adduser -S -G rtorrent -h /home/rtorrent -s /bin/sh rtorrent \
+# PUID/PGID the container's internal rtorrent/flood user should run as.
+# Set these to your host user (e.g. 1000:1000) so the downloaded data
+# on the mounted /output (and /config) volume is owned by you.
+# The container itself still runs as root (PID 1) because OpenVPN needs to
+# create the tun device and apply the iptables kill-switch; only the
+# rtorrent/flood/nginx service processes drop privileges to this user.
+ARG PUID=1000
+ARG PGID=1000
+
+# Dedicated user for rtorrent/flood (uid/gid = $PUID/$PGID)
+RUN addgroup -S -g "${PGID}" rtorrent \
+    && adduser -D -u "${PUID}" -G rtorrent -h /home/rtorrent -s /bin/sh rtorrent \
     && mkdir -p /home/rtorrent \
     && chown -R rtorrent:rtorrent /home/rtorrent
 
