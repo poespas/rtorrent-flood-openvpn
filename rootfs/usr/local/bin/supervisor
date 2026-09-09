@@ -81,6 +81,21 @@ ensure_kill_switch() {
     fi
 }
 
+ensure_lan_routes() {
+    # Keep the private LAN reachable over the docker bridge even though
+    # redirect-gateway forces internet traffic through tun. Without these
+    # routes, replies to LAN clients (published ports such as the rtorrent
+    # SCGI endpoint for Sonarr) are routed into the VPN tunnel and never
+    # reach the client. The kill-switch still blocks any *new* outbound
+    # traffic to these nets while the VPN is down (OUTPUT is DROP by
+    # default), so fail-closed behaviour is unchanged.
+    LAN_GW=$(ip route show default dev eth0 2>/dev/null | awk '{print $3; exit}')
+    [ -n "$LAN_GW" ] || return 0
+    for net in 192.168.0.0/16 172.16.0.0/12 10.0.0.0/8; do
+        ip route replace "$net" via "$LAN_GW" dev eth0 2>/dev/null
+    done
+}
+
 # ---------------------------------------------------------------------------
 # VPN endpoint resolution + effective config
 # ---------------------------------------------------------------------------
@@ -378,6 +393,9 @@ resolve_endpoints
 apply_kill_switch
 log "kill-switch active: all non-VPN outbound traffic is blocked"
 
+# Keep LAN destinations (published ports, docker gateway) reachable over eth0.
+ensure_lan_routes
+
 # Start nginx + flood immediately so the (local) web UI is reachable even
 # before the tunnel is up; both bind loopback / are proxied over loopback.
 start_nginx
@@ -400,6 +418,7 @@ while :; do
 
     # keep the firewall fail-closed
     ensure_kill_switch
+    ensure_lan_routes
 
     if tunnel_ready; then
         if [ "$STATE" != "ready" ]; then
